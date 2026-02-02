@@ -2,7 +2,13 @@
 <html lang="nl">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="Water">
+    <meta name="theme-color" content="#4A90D9">
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>💧</text></svg>">
     <title>Water Tracker</title>
     <style>
         *, *::before, *::after {
@@ -483,6 +489,25 @@
             color: var(--red);
         }
 
+        /* iOS install banner */
+        .install-banner {
+            background: var(--blue-light);
+            border: 1px solid var(--blue);
+            border-radius: var(--radius);
+            padding: 14px 16px;
+            margin-bottom: 16px;
+            text-align: center;
+            font-size: 0.85rem;
+            color: var(--blue-dark);
+            line-height: 1.5;
+            display: none;
+        }
+
+        .install-banner strong {
+            display: block;
+            margin-bottom: 4px;
+        }
+
         /* Status glow along screen edges */
         .status-glow {
             position: fixed;
@@ -541,6 +566,12 @@
             <h1>Water Tracker</h1>
             <div class="date" id="currentDate"></div>
         </header>
+
+        <!-- iOS install hint -->
+        <div class="install-banner" id="installBanner">
+            <strong>Voeg toe aan beginscherm voor notificaties</strong>
+            Tik op Deel (&#9997;) en dan "Zet op beginscherm" om herinneringen te ontvangen.
+        </div>
 
         <!-- Progress -->
         <div class="progress-section">
@@ -744,22 +775,45 @@
                 .join('');
         }
 
+        function isIOSSafari() {
+            return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+        }
+
+        function isStandalone() {
+            return window.navigator.standalone === true ||
+                   window.matchMedia('(display-mode: standalone)').matches;
+        }
+
         function updatePermissionHint() {
             const hint = document.getElementById('permissionHint');
             if (!state.notificationsEnabled) {
                 hint.innerHTML = '';
                 return;
             }
+
+            // iOS Safari but not added to home screen
+            if (isIOSSafari() && !isStandalone()) {
+                hint.innerHTML = '<p class="permission-hint denied">Voeg de app toe aan je beginscherm voor notificaties.</p>';
+                return;
+            }
+
             if (!('Notification' in window)) {
                 hint.innerHTML = '<p class="permission-hint denied">Je browser ondersteunt geen notificaties.</p>';
                 return;
             }
             if (Notification.permission === 'denied') {
-                hint.innerHTML = '<p class="permission-hint denied">Notificaties geblokkeerd. Sta ze toe in je browserinstellingen.</p>';
+                hint.innerHTML = '<p class="permission-hint denied">Notificaties geblokkeerd. Sta ze toe in je instellingen.</p>';
             } else if (Notification.permission === 'default') {
                 hint.innerHTML = '<p class="permission-hint">Klik op de toggle om toestemming te geven.</p>';
             } else {
                 hint.innerHTML = '';
+            }
+        }
+
+        function updateInstallBanner() {
+            const banner = document.getElementById('installBanner');
+            if (isIOSSafari() && !isStandalone()) {
+                banner.style.display = 'block';
             }
         }
 
@@ -876,42 +930,31 @@
         }
 
         function scheduleReminders() {
-            // Clear existing timers
+            // Clear existing in-app timers
             reminderTimers.forEach(t => clearTimeout(t));
             reminderTimers = [];
 
             if (!state.notificationsEnabled || state.reminders.length === 0) return;
 
+            // Schedule in-app banners
             const now = new Date();
             for (const time of state.reminders) {
                 const [h, m] = time.split(':').map(Number);
                 const target = new Date();
                 target.setHours(h, m, 0, 0);
-
-                if (target <= now) continue; // Skip past times
+                if (target <= now) continue;
 
                 const delay = target - now;
-                const timer = setTimeout(() => fireReminder(time), delay);
+                const timer = setTimeout(() => showBanner(), delay);
                 reminderTimers.push(timer);
             }
-        }
 
-        function fireReminder(time) {
-            // Show in-app banner
-            showBanner();
-
-            // Send browser notification
-            if ('Notification' in window && Notification.permission === 'granted') {
-                const n = new Notification('Water Tracker', {
-                    body: `Tijd om water te drinken! (${time})`,
-                    icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y="80" font-size="80">💧</text></svg>',
-                    tag: 'water-reminder',
-                    requireInteraction: true
+            // Also schedule via service worker for background notifications
+            if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+                navigator.serviceWorker.controller.postMessage({
+                    type: 'SCHEDULE_NOTIFICATIONS',
+                    reminders: state.reminders
                 });
-                n.onclick = () => {
-                    window.focus();
-                    n.close();
-                };
             }
         }
 
@@ -929,8 +972,37 @@
         }
 
         // --- Init ---
-        function init() {
+        async function init() {
+            // Register service worker
+            if ('serviceWorker' in navigator) {
+                try {
+                    const reg = await navigator.serviceWorker.register('./sw.js');
+                    // Once active, schedule reminders via SW
+                    if (reg.active) {
+                        scheduleReminders();
+                    }
+                    reg.addEventListener('updatefound', () => {
+                        const newWorker = reg.installing;
+                        newWorker.addEventListener('statechange', () => {
+                            if (newWorker.state === 'activated') {
+                                scheduleReminders();
+                            }
+                        });
+                    });
+                } catch (e) {
+                    // SW not supported or failed — fall back to in-app only
+                }
+
+                // Listen for messages from service worker (e.g. ADD_GLASS from notification action)
+                navigator.serviceWorker.addEventListener('message', (e) => {
+                    if (e.data && e.data.type === 'ADD_GLASS') {
+                        addGlass();
+                    }
+                });
+            }
+
             updateUI();
+            updateInstallBanner();
             scheduleReminders();
 
             // Check for day change every minute
