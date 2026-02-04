@@ -90,3 +90,22 @@ self.addEventListener('notificationclick', (e) => {
         );
     }
 });
+
+// Handle push events from server
+self.addEventListener('push', (e) => {
+    const data = e.data ? e.data.json() : {};
+    const title = data.title || 'Water Tracker';
+    const body = data.body || 'Tijd om water te drinken! 💧';
+
+    e.waitUntil(
+        self.registration.showNotification(title, {
+            body: body,
+            icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y="80" font-size="80">💧</text></svg>',
+            tag: 'water-reminder-push',
+            actions: [
+                { action: 'drink', title: 'Gedaan!' },
+                { action: 'dismiss', title: 'Later' }
+            ]
+        })
+    );
+});
